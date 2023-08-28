@@ -15,3 +15,7 @@ The objective was to be notified when a new letter or package was dropped in my 
 
 ## More info
 I'm also using Loxone & Loxberry to make my house a little smarter. Communication between the mailbox and Loxone/Loxberry happens with MQTT.
+
+## Liraries
+For the ToF sensors I have used Libraries I found on Github, but they didn't work 100% or where not accurate enough. So the one I created is a mix of diffrent repo's (https://github.com/DFRobot/DFRobot_VL6180X & https://github.com/pololu/vl6180x-arduino).
+The other libraries (for the RFID reader, MQTT, ...) can be found on Github.
