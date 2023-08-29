@@ -12,10 +12,11 @@ The objective was to be notified when a new letter or package was dropped in my 
 * Elektromagnetic lock (24V)
 * Reed switch (2 pieces)
 * HLK-VRB2403YMD DC-DC stepdown (24V to 3.3V)
+* 3D printer to print some casing for all the hardware
 
 ## More info
 I'm also using Loxone & Loxberry to make my house a little smarter. Communication between the mailbox and Loxone/Loxberry happens with MQTT.
 
-## Liraries
-For the ToF sensors I have used Libraries I found on Github, but they didn't work 100% or where not accurate enough. So the one I created is a mix of diffrent repo's (https://github.com/DFRobot/DFRobot_VL6180X & https://github.com/pololu/vl6180x-arduino).
+## Libraries
+The existing libraries found on Github for the ToF sensors didn't work 100% or where not accurate enough. So I've created a new one based on diffrent repo's (https://github.com/DFRobot/DFRobot_VL6180X & https://github.com/pololu/vl6180x-arduino).
 The other libraries (for the RFID reader, MQTT, ...) can be found on Github.
