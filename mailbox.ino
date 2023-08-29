@@ -48,6 +48,10 @@ volatile bool eventSWOut = false;
 volatile bool eventSWIn = false;
 
 // LED
+#define REDC   LEDC_CHANNEL_1
+#define GREENC LEDC_CHANNEL_2
+#define BLUEC  LEDC_CHANNEL_3
+#define WHITEC LEDC_CHANNEL_4
 uint8_t RGBW[4] = {0,0,0,0};
 ledc_channel_t channels[4] = {REDC, GREENC, BLUEC, WHITEC};
 
