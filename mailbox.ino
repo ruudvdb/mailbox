@@ -294,7 +294,7 @@ void setupLock() {
   pinMode(SW_INP_DOOR_PIN, INPUT_PULLUP);
 
   attachInterrupt(SW_OUT_DOOR_PIN, interruptReedOutput, CHANGE);
-  attachInterrupt(SW_INP_DOOR_PIN, interruptReedInput, FALLING);
+  attachInterrupt(SW_INP_DOOR_PIN, interruptReedInput, CHANGE);
 
   Serial.println("Lock and reeds initialized");
 }
@@ -415,14 +415,19 @@ void irqWatchdog(void * pvParameters) {
 
   long long int timerToF = 0;
   bool send = false;
+  bool frontOpen = false;
   StaticJsonDocument<48> doc;
 
   for(;;) {
     // When letter or package passes the ToF sensor
     if (eventToF) {
       //Serial.println("eventToF");
-      setLED(125,0,255,0); //blue 50%
-      doc["letter"] = true;
+      setLED(0,0,255,0); //blue 100%
+      if (frontOpen) {
+        doc["packet"] = true;
+      } else {
+        doc["letter"] = true;
+      }
       eventToF = false;
       sensor1.clearRangeInterrupt();
       sensor2.clearRangeInterrupt();
@@ -450,10 +455,18 @@ void irqWatchdog(void * pvParameters) {
       eventSWOut = false;
     }
 
-    // When front packet door (input) closes
+    // When front packet door (input) opens or closes
     if (eventSWIn) {
       Serial.println("eventSWIn");
-      doc["packet"] = true;
+      vTaskDelay(5);
+      if (digitalRead(SW_INP_DOOR_PIN) == 1) {
+        setLED(0,100,0,50);
+        doc["frontopen"] = true;
+        frontOpen = true;
+      } else {
+        doc["frontopen"] = false;
+        frontOpen = false;
+      }
       send = true;
       eventSWIn = false;
     }
