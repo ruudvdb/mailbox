@@ -28,6 +28,7 @@ Box on the left:
 * 1 x MOSFET for the electromagnetic lock (protected with a flyback diode)
 * 4 x MOSFET for the RGWB LED-strip
 * DC to DC stepdown
+
 Box on te right:
 * ESP32 devkit C
 
