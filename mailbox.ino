@@ -2,10 +2,12 @@
 #include <Wire.h>
 #include <VL6180X.h>
 #include <SPI.h>
-#include <MFRC522.h>
+#include <MFRC522v2.h>
+#include <MFRC522DriverSPI.h>
+#include <MFRC522DriverPinSimple.h>
 #include <WiFi.h>
-#include <PubSubClient.h>
 #include "driver/ledc.h"
+#include "mqtt_client.h"
 
 #define VL6180X_ADDRESS_1 0x29       //ToF sensor1 uses default I2C address
 #define VL6180X_ADDRESS_2 0x30       //ToF sensor2 has to be changed to this I2C address at boot
@@ -17,7 +19,7 @@
 #define RFID_SS_PIN GPIO_NUM_5       //SDA pin RFID
 #define RFID_IRQ_PIN GPIO_NUM_16     //IRQ pin RFID
 #define SW_OUT_DOOR_PIN GPIO_NUM_4   //REED SW pin output door (back)
-#define SW_INP_DOOR_PIN GPIO_NUM_2   //REED SW pin input door (front)
+#define SW_INP_DOOR_PIN GPIO_NUM_15  //REED SW pin input door (front)
 #define LED_R_PIN GPIO_NUM_27        //LED red pin
 #define LED_G_PIN GPIO_NUM_33        //LED green pin
 #define LED_B_PIN GPIO_NUM_26        //LED blue pin
@@ -27,19 +29,49 @@
 const char* ssid = "***";
 const char* password = "***";
 
-// Add your MQTT Broker IP address
+// Add your MQTT Broker details
 const char* mqtt_server = "<loxberry-ip>";
 const char* mqtt_user = "***";
 const char* mqtt_pass = "***";
+const char* mqtt_topic_send = "brievenbus";
+const char* mqtt_topic_open = "brievenbus/open";
+const char* mqtt_topic_reboot = "brievenbus/reboot";
+
+// MQTT
+#define NUM_OF_TOPICS (uint8_t)(2)
+esp_mqtt_topic_t topics[] = {
+  { mqtt_topic_open, 2 },
+  { mqtt_topic_reboot, 2 },
+};
+const esp_mqtt_client_config_t mqtt_cfg = {
+    .broker = {
+      .address = {
+        .hostname = mqtt_server,
+        .transport = MQTT_TRANSPORT_OVER_TCP,
+        .port = 1883,
+      }
+    },
+    .credentials = {
+      .username = mqtt_user,
+      .authentication = {
+        .password = mqtt_pass,
+      }
+    }
+};
+static esp_mqtt_client_handle_t client;
+
 WiFiClient wifiClient;
-PubSubClient MQTTclient(mqtt_server, 1883, wifiClient);
+JsonDocument docRFID;
+JsonDocument docIRQ;
 
 // ToF sensors
 VL6180X sensor1;
 VL6180X sensor2;
 
 // RFID
-MFRC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
+MFRC522DriverPinSimple ss_pin(RFID_SS_PIN);
+MFRC522DriverSPI driver{ss_pin};
+MFRC522 rfid{driver};
 MFRC522::MIFARE_Key key;
 
 // IRQ
@@ -55,8 +87,8 @@ volatile bool eventSWIn = false;
 uint8_t RGBW[4] = {0,0,0,0};
 ledc_channel_t channels[4] = {REDC, GREENC, BLUEC, WHITEC};
 
-// Tasks
-SemaphoreHandle_t sema_MQTT_KeepAlive;
+
+
 
 
 
@@ -66,13 +98,13 @@ SemaphoreHandle_t sema_MQTT_KeepAlive;
 
 void IRAM_ATTR WiFiEvent(WiFiEvent_t event) {
   switch (event) {
-    case SYSTEM_EVENT_STA_CONNECTED:
+    case WIFI_EVENT_STA_CONNECTED:
       Serial.println("Connected to WiFi access point");
       break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
+    case WIFI_EVENT_STA_DISCONNECTED:
       Serial.println("Disconnected from WiFi access point");
       break;
-    case SYSTEM_EVENT_AP_STADISCONNECTED:
+    case WIFI_EVENT_AP_STADISCONNECTED:
       Serial.println("WiFi client disconnected");
       break;
     default: 
@@ -109,74 +141,83 @@ void connectToWiFi() {
  * MQTT
  *********************************************************************************/
 
-void MQTTkeepalive( void *pvParameters ) {
-  sema_MQTT_KeepAlive = xSemaphoreCreateBinary();
-  xSemaphoreGive(sema_MQTT_KeepAlive); // found keep alive can mess with a publish, stop keep alive during publish
-  MQTTclient.setKeepAlive(90); // setting keep alive to 90 seconds makes for a very reliable connection, must be set before the 1st connection is made.
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = 250; //delay for ms
-  for (;;) {
-    //check for a is-connected and if the WiFi 'thinks' its connected, found checking on both is more realible than just a single check
-    if ((wifiClient.connected()) && (WiFi.status() == WL_CONNECTED)) {
-      xSemaphoreTake(sema_MQTT_KeepAlive, portMAX_DELAY); // whiles client.loop() is running no other mqtt operations should be in process
-      MQTTclient.loop();
-      xSemaphoreGive(sema_MQTT_KeepAlive);
-    } else {
-      Serial.printf("MQTT keep alive found MQTT status % s WiFi status % s", String(wifiClient.connected()), String(WiFi.status()));
-      if (!(wifiClient.connected()) || !(WiFi.status() == WL_CONNECTED)) {
-        connectToWiFi();
-      }
-      connectToMQTT();
+static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
+	esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+	esp_mqtt_client_handle_t client = event->client;
+
+  switch(event->event_id) {
+    case MQTT_EVENT_CONNECTED: {
+      Serial.println("[mqtt] conntected");
+      esp_mqtt_client_subscribe_multiple(client, topics, NUM_OF_TOPICS);
+      break;
     }
-    xLastWakeTime = xTaskGetTickCount();
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
-  }
-  vTaskDelete(NULL);
-}
 
-void connectToMQTT() {
-  MQTTclient.setKeepAlive(90); // needs be made before connecting
-  byte mac[5];
-  WiFi.macAddress(mac); // get mac address
-  String clientID = String(mac[0]) + String(mac[4]) ; // use mac address to create clientID
-  while (!MQTTclient.connected()) {
-    MQTTclient.connect(clientID.c_str(), mqtt_user, mqtt_pass, NULL , 1, true, NULL);
-    vTaskDelay(250);
-  }
-  MQTTclient.setCallback(callbackMQTT);
-  MQTTclient.subscribe("brievenbus/open");
-  Serial.println("MQTT Connected");
-}
+    case MQTT_EVENT_ERROR: {
+      Serial.println("[mqtt] error");
+      break;
+    }
 
-void callbackMQTT(char* topic, byte* message, unsigned int length) {
-  Serial.print("Message arrived on topic: ");
-  Serial.print(topic);
-  Serial.print(". Message: ");
-  String messageTemp;
-  
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)message[i]);
-    messageTemp += (char)message[i];
-  }
-  Serial.println();
+    case MQTT_EVENT_DISCONNECTED: {
+      Serial.println("[mqtt] disconnected");
+      break;
+    }
 
-  if (!strcmp(topic, "brievenbus/open") && messageTemp.toInt() == 1) {
-    unlock();
+    case MQTT_EVENT_SUBSCRIBED: {
+      Serial.println("[mqtt] subscribed to all topics");
+      break;
+    }
+
+    case MQTT_EVENT_UNSUBSCRIBED: {
+      Serial.println("[mqtt] unsubscribed");
+      break;
+    }
+
+    case MQTT_EVENT_PUBLISHED: {
+      Serial.println("[mqtt] published");
+      break;
+    }
+
+    case MQTT_EVENT_DATA: {
+      char read_data[event->data_len];
+      char read_topic[event->topic_len];
+      sprintf(read_data, "%.*s", event->data_len, event->data);
+      sprintf(read_topic, "%.*s", event->topic_len, event->topic);
+
+      Serial.print("[mqtt] Received data -> ");
+      Serial.println(read_data);
+      Serial.print("[mqtt] @ topic -> ");
+      Serial.println(read_topic);
+
+      if (!strcmp(read_data, "1")) {
+        if (!strcmp(read_topic, mqtt_topic_open)) {
+          unlock();      //open mailbox
+        }
+        if (!strcmp(read_topic, mqtt_topic_reboot)) {
+          ESP.restart(); //reboot ESP
+        }
+      }
+
+      break;
+    }
+
+    case MQTT_EVENT_BEFORE_CONNECT: {
+      Serial.println("[mqtt] before connect");
+      break;
+    }
+
+    default: {
+      Serial.println("[mqtt] default");
+      break;
+    }
   }
 }
 
 void sendMessageMQTT(const char* topic, const char* msg) {
-  while (!MQTTclient.connected()) {
-    vTaskDelay(250);
-  }
-  xSemaphoreTake(sema_MQTT_KeepAlive, portMAX_DELAY);
-  MQTTclient.publish(topic, msg);
-  xSemaphoreGive(sema_MQTT_KeepAlive);
-  
-  Serial.print("MQTT message send on topic ");
-  Serial.print(topic);
-  Serial.print(" => ");
+  Serial.print("[mqtt] publish message -> ");
   Serial.println(msg);
+  Serial.print("[mqtt] @ topic -> ");
+  Serial.println(topic);
+  esp_mqtt_client_publish(client, topic, msg, 0, 2, 0);
 }
 
 
@@ -265,7 +306,12 @@ void setupSensorsToF() {
 }
 
 void setupRFID() {
-  SPI.begin();
+  pinMode(RFID_RST_PIN, OUTPUT);
+  digitalWrite(RFID_RST_PIN, LOW);
+ 	delayMicroseconds(2);   //In order to perform a reset, the signal must be LOW for at least 100 ns => 2us is more than enough
+	digitalWrite(RFID_RST_PIN, HIGH);
+ 	delay(50);
+  
   rfid.PCD_Init();
 
   //set key (FFFFFFFFFFFFh - this is factory default)
@@ -300,15 +346,10 @@ void setupLock() {
 }
 
 void setupLED() {
-  ledcSetup(REDC, 1000, 8);  // 5kHz 8 bit
-  ledcSetup(GREENC, 1000, 8);
-  ledcSetup(BLUEC, 1000, 8);
-  ledcSetup(WHITEC, 1000, 8);
-
-  ledcAttachPin(LED_R_PIN, REDC);
-  ledcAttachPin(LED_G_PIN, GREENC);
-  ledcAttachPin(LED_B_PIN, BLUEC);
-  ledcAttachPin(LED_W_PIN, WHITEC);
+  ledcAttachChannel(LED_R_PIN, 1000, 8, REDC);
+  ledcAttachChannel(LED_G_PIN, 1000, 8, GREENC);
+  ledcAttachChannel(LED_B_PIN, 1000, 8, BLUEC);
+  ledcAttachChannel(LED_W_PIN, 1000, 8, WHITEC);
 
   ledc_fade_func_install(0);
 
@@ -316,9 +357,11 @@ void setupLED() {
 }
 
 void unlock() {
+  Serial.println("Unlock start");
   digitalWrite(LOCK_PIN, HIGH);
   vTaskDelay(2500);
   digitalWrite(LOCK_PIN, LOW);
+  Serial.println("Unlock end");
 }
 
 void setLED(uint r, uint g, uint b, uint w) {
@@ -342,10 +385,22 @@ void setup() {
   Serial.begin(115200);
   while (!Serial);
 
-  xTaskCreatePinnedToCore(MQTTkeepalive, "MQTTkeepalive", 7000, NULL, 9, NULL, 1);
-  xTaskCreatePinnedToCore(updateLEDs, "updateLEDs", 2000, NULL, 2, NULL, 1);
-  xTaskCreatePinnedToCore(rfidWatchdog, "rfidWatchdog", 10000, NULL, 9, NULL, 0);
+  connectToWiFi();
+
+  client = esp_mqtt_client_init(&mqtt_cfg);
+  esp_mqtt_client_register_event(client, MQTT_EVENT_ERROR, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_CONNECTED, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_DISCONNECTED, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_SUBSCRIBED, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_UNSUBSCRIBED, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_PUBLISHED, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_DATA, mqtt_event_handler, client);
+	esp_mqtt_client_register_event(client, MQTT_EVENT_BEFORE_CONNECT, mqtt_event_handler, client);
+  esp_mqtt_client_start(client);
+
+  xTaskCreatePinnedToCore(rfidWatchdog, "rfidWatchdog", 10000, NULL, 20, NULL, 0);
   xTaskCreatePinnedToCore(irqWatchdog, "irqWatchdog", 10000, NULL, 8, NULL, 0);  
+  xTaskCreatePinnedToCore(updateLEDs, "updateLEDs", 2000, NULL, 2, NULL, 1);
 
   Serial.println("end setup");
 }
@@ -354,10 +409,10 @@ void rfidWatchdog(void * pvParameters) {
   setupRFID();
 
   TickType_t xLastWakeTime    = xTaskGetTickCount();
-  const TickType_t xFrequency = 75; //delay for mS
+  const TickType_t xFrequency = 100; //delay for mS
 
   bool send = false;
-  StaticJsonDocument<48> doc;
+  docRFID.clear();
 
   for(;;) {
     if (rfid.PICC_IsNewCardPresent()) {
@@ -368,11 +423,12 @@ void rfidWatchdog(void * pvParameters) {
         for (int i = 0; i < rfid.uid.size; i++) {
           sprintf(&dest[i * 2], "%02X", rfid.uid.uidByte[i]);
         }
-        doc["rfidtag"] = dest;
+        Serial.println(dest);
+        docRFID["rfidtag"] = dest;
         send = true;
 
         // Unlock door if uid matches
-        if (doc["rfidtag"] == "36B3673B") {
+        if (docRFID["rfidtag"] == "36B3673B") {
           setLED(0,255,0,0);
           unlock();
         } else {
@@ -392,12 +448,12 @@ void rfidWatchdog(void * pvParameters) {
     // MQTT send
     if (send) {
       char brievenbus[56];
-      serializeJson(doc, brievenbus);
-      sendMessageMQTT("brievenbus", brievenbus);
+      serializeJson(docRFID, brievenbus);
+      sendMessageMQTT(mqtt_topic_send, brievenbus);
+      docRFID.clear();
     }
 
     send = false;
-    doc.clear();
 
     xLastWakeTime = xTaskGetTickCount();
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -416,7 +472,7 @@ void irqWatchdog(void * pvParameters) {
   long long int timerToF = 0;
   bool send = false;
   bool frontOpen = false;
-  StaticJsonDocument<48> doc;
+  docIRQ.clear();
 
   for(;;) {
     // When letter or package passes the ToF sensor
@@ -424,9 +480,9 @@ void irqWatchdog(void * pvParameters) {
       //Serial.println("eventToF");
       setLED(0,0,255,0); //blue 100%
       if (frontOpen) {
-        doc["packet"] = true;
+        docIRQ["packet"] = true;
       } else {
-        doc["letter"] = true;
+        docIRQ["letter"] = true;
       }
       eventToF = false;
       sensor1.clearRangeInterrupt();
@@ -444,12 +500,12 @@ void irqWatchdog(void * pvParameters) {
       vTaskDelay(5);
       if (digitalRead(SW_OUT_DOOR_PIN) == 1) {
         setLED(0,0,0,255); //white 100%
-        doc["dooropen"] = true;
+        docIRQ["dooropen"] = true;
       } else {
         setLED(0,0,0,0); //off
-        doc["letter"] = false;
-        doc["packet"] = false;
-        doc["dooropen"] = false;
+        docIRQ["letter"] = false;
+        docIRQ["packet"] = false;
+        docIRQ["dooropen"] = false;
       }
       send = true;
       eventSWOut = false;
@@ -461,10 +517,10 @@ void irqWatchdog(void * pvParameters) {
       vTaskDelay(5);
       if (digitalRead(SW_INP_DOOR_PIN) == 1) {
         setLED(0,100,0,50);
-        doc["frontopen"] = true;
+        docIRQ["frontopen"] = true;
         frontOpen = true;
       } else {
-        doc["frontopen"] = false;
+        docIRQ["frontopen"] = false;
         frontOpen = false;
       }
       send = true;
@@ -474,12 +530,12 @@ void irqWatchdog(void * pvParameters) {
     // MQTT send
     if (send) {
       char brievenbus[56];
-      serializeJson(doc, brievenbus);
-      sendMessageMQTT("brievenbus", brievenbus);
+      serializeJson(docIRQ, brievenbus);
+      sendMessageMQTT(mqtt_topic_send, brievenbus);
+      docIRQ.clear();
     }
 
     send = false;
-    doc.clear();
 
     xLastWakeTime = xTaskGetTickCount();
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -504,14 +560,3 @@ void updateLEDs(void * pvParameters) {
 void loop() {
 
 }
-
-
-
-
-
-
-
-
-
-
-
