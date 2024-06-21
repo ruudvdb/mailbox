@@ -19,7 +19,7 @@ I'm also using Loxone & Loxberry to make my house a little smarter. Communicatio
 
 ## Libraries
 The existing libraries found on Github for the ToF sensors didn't work 100% or where not accurate enough. So I've created a new one based on diffrent repo's (https://github.com/DFRobot/DFRobot_VL6180X & https://github.com/pololu/vl6180x-arduino).
-The other libraries (for the RFID reader, MQTT, ...) can be found on Github.
+The other libraries (for the RFID reader, ...) can be found on Github.
 
 ## Photos
 ![Power and ESP](https://github.com/ruudvdb/smart-mailbox/blob/main/mailbox1.jpg?raw=true)
@@ -36,4 +36,4 @@ Box on te right:
 
 ![Overview](https://github.com/ruudvdb/smart-mailbox/blob/main/mailbox2.jpg?raw=true)
 
-Overall overview
+Overall view
